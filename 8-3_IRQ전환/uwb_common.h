@@ -115,7 +115,12 @@ static inline void uwb_irq_init(void) {
  */
 static inline uint32_t uwb_wait_event(uint32_t timeout_ms) {
     if (xSemaphoreTake(s_uwb_sem, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
-        return dwt_readsysstatuslo();
+        uint32_t status = dwt_readsysstatuslo();
+        /* IRQ 핀 클리어: dwt_isr()로 DW3000 내부 상태 리셋 → 다음 POSEDGE 가능 */
+        while (gpio_get_level(DW3000_IRQ_PIN)) {
+            dwt_isr();
+        }
+        return status;
     }
     dwt_forcetrxoff();
     return 0;
@@ -180,6 +185,21 @@ static inline int uwb_init(uint16_t my_addr) {
     dwt_setlnapamode(DWT_LNA_ENABLE | DWT_PA_ENABLE);
     dwt_setpanid(UWB_PAN_ID);
     dwt_setaddress16(my_addr);
+
+    /* IRQ 설정 */
+    uwb_irq_init();
+    dwt_setinterrupt(
+        DWT_INT_TXFRS_BIT_MASK | DWT_INT_RXFCG_BIT_MASK |
+        SYS_STATUS_ALL_RX_ERR | SYS_STATUS_ALL_RX_TO,
+        0, DWT_ENABLE_INT_ONLY);
+
+    /* 초기 IRQ 클리어 */
+    dwt_writesysstatuslo(0xFFFFFFFF);
+    while (gpio_get_level(DW3000_IRQ_PIN)) {
+        dwt_isr();
+    }
+    /* 초기화 중 세마포어에 쌓인 것 비우기 */
+    xSemaphoreTake(s_uwb_sem, 0);
 
     return 0;
 }

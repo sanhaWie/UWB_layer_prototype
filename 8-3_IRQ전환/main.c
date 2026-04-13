@@ -416,7 +416,7 @@ static void handle_ss_twr_poll(uint8_t *rx_buf) {
     dwt_writetxfctrl(RESP_LEN + 2, 0, 1);
     int ret = dwt_starttx(DWT_START_TX_DELAYED);
     if (ret == DWT_SUCCESS) {
-        /* TX 완료 대기 (타임아웃 5ms) */
+        /* TX 완료 대기: polling */
         int64_t t0 = esp_timer_get_time();
         while (!(dwt_readsysstatuslo() & SYS_STATUS_TXFRS_BIT_MASK)) {
             if (esp_timer_get_time() - t0 > 5000) {
@@ -428,6 +428,9 @@ static void handle_ss_twr_poll(uint8_t *rx_buf) {
             }
         };
         dwt_writesysstatuslo(SYS_STATUS_TXFRS_BIT_MASK);
+        /* TX 후 IRQ 핀 클리어 */
+        while (gpio_get_level(DW3000_IRQ_PIN)) { dwt_isr(); }
+        xSemaphoreTake(s_uwb_sem, 0); /* TX IRQ로 쌓인 세마포어 비우기 */
     } else {
         dwt_forcetrxoff();
         dwt_writesysstatuslo(SYS_STATUS_TXFRS_BIT_MASK |
@@ -458,7 +461,7 @@ void app_main(void)
     }
 
     cmd_udp_init();
-    ESP_LOGI(TAG, "준비 완료 (addr=0x%04X)", MY_ADDR);
+    ESP_LOGI(TAG, "준비 완료 (addr=0x%04X) IRQ=%d", MY_ADDR, gpio_get_level(DW3000_IRQ_PIN));
     neopixel_set(0, 255, 0);
 
     bool anchor_stopped = false;
@@ -497,14 +500,11 @@ void app_main(void)
             continue;
         }
 
-        /* 2. UWB RX: 연속 수신 대기 (polling) */
-        dwt_setrxtimeout(5000); /* 5ms 타임아웃 */
+        /* 2. UWB RX: IRQ 기반 수신 대기 */
+        dwt_setrxtimeout(0);
         dwt_rxenable(DWT_START_RX_IMMEDIATE);
 
-        uint32_t status;
-        while (!((status = dwt_readsysstatuslo()) &
-                 (SYS_STATUS_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_ERR | SYS_STATUS_ALL_RX_TO)))
-        { };
+        uint32_t status = uwb_wait_event(100); /* 100ms 세마포어 대기 */
 
         if (!(status & SYS_STATUS_RXFCG_BIT_MASK)) {
             dwt_writesysstatuslo(SYS_STATUS_ALL_RX_ERR | SYS_STATUS_ALL_RX_TO);
